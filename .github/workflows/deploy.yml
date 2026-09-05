@@ -1,0 +1,91 @@
+name: Deploy StudyGenie (Vercel & Render)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  ci-validate:
+    name: Build & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+          cache-dependency-path: |
+            client/package-lock.json
+            server/package-lock.json
+
+      - name: Validate Server Syntax & Dependencies
+        run: |
+          cd server
+          npm ci
+          node --check src/server.js
+
+      - name: Build Frontend Application
+        run: |
+          cd client
+          npm ci
+          npm run build
+
+  deploy-backend-render:
+    name: Deploy Backend to Render
+    needs: ci-validate
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Trigger Render Deploy Hook
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "::warning ::RENDER_DEPLOY_HOOK_URL secret is not configured in GitHub repository secrets. If you connected Render via Git Blueprint or automatic git integration, Render will deploy automatically on push."
+          else
+            echo "Triggering Render deployment webhook..."
+            response=$(curl -s -w "\n%{http_code}" -X POST "$RENDER_DEPLOY_HOOK_URL")
+            http_code=$(echo "$response" | tail -n1)
+            body=$(echo "$response" | sed '$d')
+            echo "Render response ($http_code): $body"
+            if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+              echo "Render deploy triggered successfully!"
+            else
+              echo "::error ::Render deployment hook returned HTTP $http_code: $body"
+              exit 1
+            fi
+          fi
+
+  deploy-frontend-vercel:
+    name: Deploy Frontend to Vercel
+    needs: ci-validate
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::warning ::VERCEL_TOKEN secret is not configured in GitHub repository secrets. If your GitHub repo is connected to Vercel directly, Vercel will build and deploy automatically on push using client/vercel.json."
+          else
+            echo "Installing Vercel CLI..."
+            npm install -g vercel@latest
+            echo "Pulling Vercel Environment Information..."
+            cd client
+            vercel pull --yes --environment=production --token=$VERCEL_TOKEN
+            echo "Building Vercel Production Artifacts..."
+            vercel build --prod --token=$VERCEL_TOKEN
+            echo "Deploying to Vercel Production..."
+            vercel deploy --prebuilt --prod --token=$VERCEL_TOKEN
+          fi
